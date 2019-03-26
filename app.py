@@ -136,9 +136,9 @@ def sc_lpn():
 	payload = j['DevEUI_uplink']['payload_hex']
 	payload_int = int(j['DevEUI_uplink']['payload_hex'],16)
 	r_bytes = bytearray.fromhex(payload)
-	print("payload=" + r_bytes)
+	print("payload=" + payload)
 	r_time = j['DevEUI_uplink']['Time']
-	r_timestamp = dt.datetime.strptime(r_time,"%Y-%m-%dT%H:%M:%S.%f+02:00")
+	r_timestamp = dt.datetime.strptime(r_time,"%Y-%m-%dT%H:%M:%S.%f+01:00")
 	if len(r_bytes) == 1:
 		print ('bytes length = ', len(r_bytes))
 		if (r_bytes[0]==ord('t')):	##send time when receives t
@@ -151,7 +151,7 @@ def sc_lpn():
 
 			params = {'DevEUI' : r_deveui,
 					  'FPORT' : '1',
-					  'Payload' : time_bytes}
+					  'Payload' : time_bytes_string}
 			url="https://proxy1.lpn.swisscom.ch/thingpark/lrc/rest/downlink/"
 			r = requests.post(url, params=params)
 			print("url", r.url)
@@ -168,23 +168,23 @@ def sc_lpn():
 			return "something went wrong"
 	else:
 		if r_deveui in tuino_list:
-			r_temperature = (r_bytes[0]<<8)+r_bytes[1]
-			r_iluminance = r_bytes[2]
+			r_temperature = ((r_bytes[0]<<8)+r_bytes[1])/100
+			r_illuminance = r_bytes[2]
 			r_humidity = r_bytes[3]
-			r_counter = (r_bytes[4]>>8)+r_bytes[5]
-			r_debit = ((r_bytes[6]>>8)+r_bytes[7])/100
-			r_voltage = ((r_bytes[8]>>8)+r_bytes[9])
+			r_counter = (r_bytes[4]<<8)+r_bytes[5]
+			r_debit = ((r_bytes[6]<<8)+r_bytes[7])/100
+			r_voltage = ((r_bytes[8]<<8)+r_bytes[9])
 
 			print('Temperature = ' + str(r_temperature) + ' deg C')
-			print('Iluminance = ' + str(r_iluminance) + '%')
+			print('illuminance = ' + str(r_illuminance) + '%')
 			print('Humidity = ' + str(r_humidity) + '%')
 			print('Counter = ' + str(r_counter) + ' pulses')
-			print('Debit = ' + str(r_debit) + ' l')
+			print('Debit = ' + str(r_debit) + ' liters')
 			print('Voltage = ' + str(r_voltage) + ' mV')
 		else:
 			return "device type not recognised"
 
-	datapoint = DataPoint(devEUI=r_deveui, time= r_time, timestamp = r_timestamp, temperature=r_temperature, iluminance=r_iluminance, humidity = r_humidity, counter=r_counter, debit=r_debit, voltage=r_voltage)
+	datapoint = DataPoint(devEUI=r_deveui, time= r_time, timestamp = r_timestamp, temperature=r_temperature, illuminance=r_illuminance, humidity = r_humidity, counter=r_counter, debit=r_debit, voltage=r_voltage)
 	print(datapoint)
 	datapoint.save()
 	print('Datapoint saved to database')
