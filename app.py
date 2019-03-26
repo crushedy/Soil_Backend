@@ -2,22 +2,27 @@
 import os
 import json
 import struct
+import time
+import requests
 import numpy as np
+import binascii
 import datetime as dt
 from flask import Flask, Response, request, redirect, url_for, escape, jsonify, make_response
 from flask_mongoengine import MongoEngine
 from itertools import chain
 
+
+
 app = Flask(__name__)
 TIME_FORMAT = "%Y-%m-%d_%H:%M:%S"
 TIME_FORMAT_DEL = "%Y-%m-%dT%H:%M:%S"
 
-dev_euis = ['78AF580300000485','78AF580300000506']
+dev_euis = ['78AF580300000485','78AF580300000506', '78AF580300000512']
 
 # check if running in the cloud and set MongoDB settings accordingly
 if 'VCAP_SERVICES' in os.environ:
 	vcap_services = json.loads(os.environ['VCAP_SERVICES'])
-	mongo_credentials = vcap_services['mongodb'][0]['credentials']
+	mongo_credentials = vcap_services['mongodb-2'][0]['credentials']
 	mongo_uri = mongo_credentials['uri']
 else:
 	mongo_uri = 'mongodb://localhost/db'
@@ -26,11 +31,7 @@ else:
 app.config['MONGODB_SETTINGS'] = [
 	{
 		'host': mongo_uri,
-		'alias': 'gps-points'
-	},
-	{
-		'host': mongo_uri,
-		'alias': 'gateways'
+		'alias': 'soil_params'
 	}
 ]
 
@@ -39,35 +40,17 @@ db = MongoEngine(app)
 
 class DataPoint(db.Document):
 	devEUI = db.StringField(required=True)
-	deviceType = db.StringField()
-	track_ID = db.IntField() #test purpose to seperate into different pieces
 	timestamp = db.DateTimeField()
 	time = db.StringField()
-	gps_lat = db.FloatField()
-	gps_lon = db.FloatField()
-	gps_sat = db.IntField()
-	gps_hdop = db.FloatField()
-	gps_speed = db.FloatField()
-	gps_course = db.IntField()
-	temperature = db.FloatField()
-	humidity = db.FloatField()
-	sp_fact = db.IntField()
-	channel = db.StringField()
-	sub_band = db.StringField()
-	sub_band = db.StringField()
-	gateway_id = db.ListField(db.StringField())
-	gateway_rssi = db.ListField(db.FloatField())
-	gateway_snr = db.ListField(db.FloatField())
-	gateway_esp = db.ListField(db.FloatField())
-	tx_pow = db.IntField()
-	#work in a specific mongoDB collection:
-	meta = {'db_alias': 'gps-points'}
+	temperature = db.IntField()
+	illuminance = db.IntField()
+	humidity = db.IntField()
+	counter = db.IntField()
+	debit = db.FloatField()
+	voltage = db.IntField()
 
-class Gateways(db.Document):
-	gateway_id = db.StringField(requred=True)
-	gateway_lat = db.FloatField()
-	gateway_lon = db.FloatField()
-	meta = {'db_alias': 'gateways'}
+	#work in a specific mongoDB collection:
+	meta = {'db_alias': 'soil_params'}
 
 # set the port dynamically with a default of 3000 for local development
 port = int(os.getenv('PORT', '3000'))
@@ -79,11 +62,11 @@ def bitshift (payload,lastbyte):
 # our base route which just returns a string
 @app.route('/')
 def hello_world():
-	return "<b>Congratulations! Welcome to Spaghetti v1!</b>"
+	return "<b>Congratulations! Welcome to Soil Parameter!</b>"
 
 #some functions for the freeboard interface
-@app.route('/freeboard/devices',methods=['GET'])
-def freeboard_devices():
+@app.route('/devices',methods=['GET'])
+def devices():
 	query = request.args
 	if 'dev' in query:
 		for i, dev in enumerate(dev_euis):
@@ -91,52 +74,17 @@ def freeboard_devices():
 				return json.dumps(latest_values[i],indent=4)
 	return json.dumps({})
 
-@app.route('/freeboard/dbmonitor',methods=['GET'])
-def freeboard_db():
-	db_state = {}
-	db_state.update({"Total entries":DataPoint.objects().count()})
-	track_array = []
-	for i in range (0,31):
-		track_array.append(DataPoint.objects(track_ID=i).count())
-	db_state.update({"Tracks":track_array})
-	return json.dumps(db_state,indent=4)
-
-#made to import data from backup file, point per point
-@app.route('/import', methods=['POST'])
-def import_backup():
-	query = request.args
-	if 'devEUI' in query and 'deviceType' in query and 'track_ID' in query and 'timestamp' in query and 'time' in query and 'gps_lat' in query and 'gps_lon' in query and 'gps_sat' in query and 'gps_hdop' in query and 'gps_speed' in query and 'gps_course' in query and 'temperature' in query and 'humidity' in query and 'sp_fact' in query and 'channel' in query and 'sub_band' in query and 'gateway_id' in query and 'gateway_rssi' in query and 'gateway_snr' in query and 'gateway_esp' in query and 'tx_pow' in query:
-		datapoint = DataPoint(devEUI=query['r_deveui'], time= query['r_time'], timestamp = query['r_timestamp'], deviceType = query['r_devtype'], gps_sat = query['r_sat'], 
-			gps_hdop = query['r_hdop'], track_ID = query['r_trk'], gps_lat=query['r_lat'], gps_lon=query['r_lon'],
-			gps_speed = query['r_speed'], gps_course = query['r_course'], temperature=query['r_temp'], humidity=query['r_hum'], sp_fact=query['r_sp_fact'], 
-			channel=query['r_channel'], sub_band=query['r_band'], gateway_id=query['g_id'], gateway_rssi=query['g_rssi'], gateway_snr=query['g_snr'], 
-			gateway_esp=query['g_esp'], tx_pow = query['r_txpow'])
-		datapoint.save()
-		return 'Point stored'
-
-	else:
-		return 'ERROR: missing inputs'
 
 #output JSON
 @app.route('/json', methods=['GET'])
 def print_json():
 	query = request.args
-	if 'track' in query:
-		response = DataPoint.objects(track_ID=int(query['track'])).to_json()
-	else:
-		response = DataPoint.objects().to_json()
-
-	return Response(response,mimetype='application/json',
-		headers={'Content-Disposition':'attachment;filename=database.json'})
+	response = DataPoint.objects().to_json()
+	return Response(response,mimetype='application/json', headers={'Content-Disposition':'attachment;filename=database.json'})
 
 #querying the database and giving back a JSON file
 @app.route('/query', methods=['GET'])
 def db_query():
-	query = request.args
-	txpow = 0
-	sf = 7
-	track = 20
-	hdop = 500
 	start = dt.datetime.now() - dt.timedelta(days=365)
 	end = dt.datetime.now() + dt.timedelta(hours=2)
 
@@ -148,11 +96,6 @@ def db_query():
 		#return 'objects deleted'
 		return 'delete feature disabled for security reasons'
 
-	if 'deltrack' in query:
-		#DataPoint.objects(track_ID=int(query['deltrack'])).delete()
-		#return 'track deleted'
-		return 'function disabled for security reasons'
-
 	if 'delpoint' in query:
 		print('query for deleting point received')
 		deltime_start = dt.datetime.strptime(query['delpoint'], TIME_FORMAT_DEL) - dt.timedelta(seconds=2)
@@ -161,27 +104,11 @@ def db_query():
 		DataPoint.objects(timestamp__lt=deltime_end, timestamp__gt=deltime_start).delete()
 		return '{} points deleted'.format(n_points)
 
-	if 'track' in query:
-		track = int(query['track'])
-
 	if 'start' in query:
 		start = dt.datetime.strptime(query['start'], TIME_FORMAT)
 
 	if 'end' in query:
 		end = dt.datetime.strptime(query['end'], TIME_FORMAT)
-
-	if 'hdop' in query:
-		hdop = query['hdop']
-
-	if 'sf' in query and 'txpow' in query:
-		sf = int(query['sf'])
-		txpow = int(query['txpow'])
-
-	if 'device' in query:
-		device = query['device']
-		datapoints = DataPoint.objects(track_ID=track,devEUI=device,timestamp__lt=end,timestamp__gt=start,sp_fact=sf,tx_pow=txpow,gps_hdop__lt=hdop).to_json()
-	else:
-		datapoints = DataPoint.objects(track_ID=track,timestamp__lt=end,timestamp__gt=start,sp_fact=sf,tx_pow=txpow,gps_hdop__lt=hdop).to_json()
 
 	return datapoints
 
@@ -193,9 +120,6 @@ def sc_lpn():
 	This method handles every message sent by the LORA sensors
 	:return:
 	"""
-
-	latest_esp = esp_buff
-
 	print("Data received from ThingPark...")
 	j = []
 	try:
@@ -203,181 +127,70 @@ def sc_lpn():
 	except:
 		print("Unable to read information or json from sensor...")
 	
-	#print("Args received:")
-	#print(args_received)
 	print("JSON received:")
 	print(j)
-
-	tuino_list = ['78AF580300000485','78AF580300000506']
-	direxio_list = ['78AF58060000006D']
-
+	tuino_list = ['78AF580300000485','78AF580300000506', '78AF580300000512']
+	r_deveui = j['DevEUI_uplink']['DevEUI']
 	#Parse JSON from ThingPark
-	size_payload=20
+	print("devEUI="+r_deveui)
 	payload = j['DevEUI_uplink']['payload_hex']
 	payload_int = int(j['DevEUI_uplink']['payload_hex'],16)
-	bytes = bytearray.fromhex(payload)
-	r_deveui = j['DevEUI_uplink']['DevEUI']
-	print("DevEUI: "+str(r_deveui))
+	r_bytes = bytearray.fromhex(payload)
+	print("payload=" + r_bytes)
 	r_time = j['DevEUI_uplink']['Time']
-	#Directive %z not supported in python 2! 
-	#Todo: Use Python 3 and remove fixed timezone
 	r_timestamp = dt.datetime.strptime(r_time,"%Y-%m-%dT%H:%M:%S.%f+02:00")
-	r_sp_fact = j['DevEUI_uplink']['SpFact']
-	r_channel = j['DevEUI_uplink']['Channel']
-	r_band = j['DevEUI_uplink']['SubBand']
+	if len(r_bytes) == 1:
+		print ('bytes length = ', len(r_bytes))
+		if (r_bytes[0]==ord('t')):	##send time when receives t
+			print('Sending Time')
+			headers_post = "Content-type:application/x-www-form-urlencoded"
+			r_time=int(time.time())
+			time_bytes = struct.pack(">I", r_time)
+			time_bytes_string =  binascii.hexlify(bytearray(time_bytes))
+			print('sending to LoRa payload : ',time_bytes_string)
 
-	g_id = []
-	g_rssi = []
-	g_snr = []
-	g_esp = []
-
-	#parse array of multiple gateways
-	for item in j['DevEUI_uplink']['Lrrs']['Lrr']:
-		g_id.append(item['Lrrid'])
-		g_rssi.append(item['LrrRSSI'])
-		g_snr.append(item['LrrSNR'])
-		g_esp.append(item['LrrESP'])
-		if item['Lrrid']=='0B030153':
-			latest_esp = item['LrrESP']
-
-	if(r_deveui in tuino_list):
-		r_devtype = "tuino-v3"
-		#r_lat = struct.unpack('<l', bytes.fromhex(payload[10:18]))[0] /10000000.0
-		#r_lon = struct.unpack('<l', bytes.fromhex(payload[18:26]))[0] /10000000.0
-		#r_temp = struct.unpack('<i', bytes.fromhex(payload[2:6]))[0] /100.0
-		#r_hum = struct.unpack('<i', bytes.fromhex(payload[6:10]))[0] /100.0
-		r_lat = ((payload_int & 0x0000000000ffffffff0000000000000000000000) >> bitshift(size_payload,8))/10000000.0
-		r_lon = ((payload_int & 0x000000000000000000ffffffff00000000000000) >> bitshift(size_payload,12))/10000000.0
-		r_temp = ((payload_int & 0x00ffff0000000000000000000000000000000000) >> bitshift(size_payload,2))/100.0
-		r_hum = ((payload_int & 0x000000ffff000000000000000000000000000000) >> bitshift(size_payload,4))/100.0
-		r_sat = ((payload_int & 0x00000000000000000000000000ff000000000000) >> bitshift(size_payload,13))
-		r_hdop = ((payload_int & 0x0000000000000000000000000000ffff00000000) >> bitshift(size_payload,15))
-		r_speed = ((payload_int & 0x00000000000000000000000000000000ff000000) >> bitshift(size_payload,16)) / 2
-		r_course = ((payload_int & 0x0000000000000000000000000000000000ff0000) >> bitshift(size_payload,17)) * 2
-		r_trk = ((payload_int & 0x000000000000000000000000000000000000ff00) >> bitshift(size_payload,18))
-		r_txpow= ((payload_int & 0x00000000000000000000000000000000000000ff) >> bitshift(size_payload,19))
-
-		#update latest values
-		for i, dev in enumerate(dev_euis):
-			if r_deveui == dev:
-				latest_values[i].update({"devEUI":r_deveui,"ESP 0B030153":latest_esp,"Position":(r_lat,r_lon),"Humidity":r_hum,"Temperature":r_temp,
-					"Time":r_time,"Track":r_trk,"TXpow":r_txpow,"SF":r_sp_fact,"HDOP":r_hdop})
-
-		print('TXpow: ' + str(r_txpow))
-		print('SF: '+ str(r_sp_fact))
-		print('Lat: ' + str(r_lat))
-		print('Lon: ' + str(r_lon))
-		print('Temp: ' + str(r_temp))
-		print('Hum: ' + str(r_hum))
-		print('Satellites: ' + str(r_sat))
-		print('HDOP: ' + str(r_hdop))
-		print('Track: ' + str(r_trk))
-		print('Speed: ' + str(r_speed))
-		print('Course: ' + str(r_course))
-
-	elif (r_deveui in direxio_list):
-		r_devtype = "direxio-v1"
-		r_lat = struct.unpack('<f', bytes.fromhex(payload[10:18]))[0]
-		r_lon = struct.unpack('<f', bytes.fromhex(payload[20:28]))[0]
-		r_temp = -99
-		r_hum = -99
-		r_sat = 0
-		r_hdop = 20
-		r_speed = 0
-		r_course = 0
-		r_txpow = 0
-		r_trk = 99 #test track number
-
-		print(r_lat)
-		print(r_lon)
-	else:
-		return "device type not recognised"
-
-	#to check if gps coords are available
-	gpfix = 1
-	
-	#TODO: check if gpscord = 0.0
-	
-	if gpfix:
-		datapoint = DataPoint(devEUI=r_deveui, time= r_time, timestamp = r_timestamp, deviceType = r_devtype, gps_sat = r_sat, 
-			gps_hdop = r_hdop, track_ID = r_trk, gps_lat=r_lat, gps_lon=r_lon,
-			gps_speed = r_speed, gps_course = r_course, temperature=r_temp, humidity=r_hum, sp_fact=r_sp_fact, 
-			channel=r_channel, sub_band=r_band, gateway_id=g_id, gateway_rssi=g_rssi, gateway_snr=g_snr, 
-			gateway_esp=g_esp, tx_pow = r_txpow)
-		print(datapoint)
-		datapoint.save()
-		print('Datapoint saved to database')
-		return 'Datapoint DevEUI %s saved' %(r_deveui)
-	else:
-		print("no gps coords, point not saved")
-		return 'Datapoint DevEUI %s not saved because no gps coords available' %(r_deveui)
-
-# post and get gateways to the gateway db collection
-@app.route('/gateways', methods=['POST','GET'])
-def gateway_data():
-	if  request.method == 'POST':
-		#print('gateway post method detected')
-		#print(request.args)
-		gtw_dict = request.args
-
-		#check if the request is valid and contains all the necessary fields
-		if ('id' in gtw_dict and 'lat' in gtw_dict and 'lon' in gtw_dict):
-			#check if it is delete request
-			if('action' in gtw_dict and gtw_dict['action']=='delete'):
-				print("it's a delete request")
-				#Gateways.objects(gateway_id=gtw_dict['id']).delete()
-				#return 'gateway deleted'
-				return "delete function disabled for security reasons"
-
-			#print(len(Gateways.objects(gateway_id=gtw_dict['id'])))
-			#test if gateway already exists
-			if (len(Gateways.objects(gateway_id=gtw_dict['id']))) > 0:
-				return 'gateway already exists'
-			else:
-				gateway = Gateways(gateway_id=gtw_dict['id'], gateway_lat=gtw_dict['lat'], gateway_lon=gtw_dict['lon'])
-				gateway.save()
-				return 'gateway saved'
+			params = {'DevEUI' : r_deveui,
+					  'FPORT' : '1',
+					  'Payload' : time_bytes}
+			url="https://proxy1.lpn.swisscom.ch/thingpark/lrc/rest/downlink/"
+			r = requests.post(url, params=params)
+			print("url", r.url)
+			print(r.text)
+			return r.text
+		elif r_bytes[0]==ord('U'):	##Unexpected Flow
+			print('unexpected flow')
+			return "Unexpected Flow"
+		elif r_bytes[0]==ord('B'):	##Battery Low
+			print('Battery Low')
+			return "Battery Low"
 		else:
-			abort (400) #bad request
-	else: 
-		inp = request.args
-		if('lat' in inp and 'lon' in inp and 'radius' in inp):
-			lat1 = (float(inp['lat']) - m_to_coord('lat',float(inp['radius']),float(inp['lat'])))
-			lat2 = (float(inp['lat']) + m_to_coord('lat',float(inp['radius']),float(inp['lat'])))
-			lon1 = (float(inp['lon']) - m_to_coord('lon',float(inp['radius']),float(inp['lat'])))
-			lon2 = (float(inp['lon']) + m_to_coord('lon',float(inp['radius']),float(inp['lat'])))
-			gateways = Gateways.objects(gateway_lat__gt=lat1,gateway_lat__lt=lat2,gateway_lon__gt=lon1,gateway_lon__lt=lon2).to_json()
-		elif('eui' in inp):
-			gateways = Gateways.objects(gateway_id=inp['eui'])
+			print("bytes = ", r_bytes[0])
+			return "something went wrong"
+	else:
+		if r_deveui in tuino_list:
+			r_temperature = (r_bytes[0]<<8)+r_bytes[1]
+			r_iluminance = r_bytes[2]
+			r_humidity = r_bytes[3]
+			r_counter = (r_bytes[4]>>8)+r_bytes[5]
+			r_debit = ((r_bytes[6]>>8)+r_bytes[7])/100
+			r_voltage = ((r_bytes[8]>>8)+r_bytes[9])
+
+			print('Temperature = ' + str(r_temperature) + ' deg C')
+			print('Iluminance = ' + str(r_iluminance) + '%')
+			print('Humidity = ' + str(r_humidity) + '%')
+			print('Counter = ' + str(r_counter) + ' pulses')
+			print('Debit = ' + str(r_debit) + ' l')
+			print('Voltage = ' + str(r_voltage) + ' mV')
 		else:
-			gateways = Gateways.objects.to_json()
-		
-		return gateways
+			return "device type not recognised"
 
+	datapoint = DataPoint(devEUI=r_deveui, time= r_time, timestamp = r_timestamp, temperature=r_temperature, iluminance=r_iluminance, humidity = r_humidity, counter=r_counter, debit=r_debit, voltage=r_voltage)
+	print(datapoint)
+	datapoint.save()
+	print('Datapoint saved to database')
+	return 'Datapoint DevEUI %s saved' %(r_deveui)
 
-def m_to_coord(latlon, meter, deglat):
-	R = 40030173
-	if latlon == 'lon':
-		return (meter/(np.cos(np.radians(deglat))*R))*360.0
-	elif latlon == 'lat':
-		return (meter/R)*360.0
-	else:
-		print('return 0')
-		return 0
-
-def coord_to_m(latlon, meter, deglat):
-	R = 40030173
-	if latlon == 'lon':
-		return (meter/360.0)*(np.cos(np.radians(deglat))*R)
-	elif latlon == 'lat':
-		return (meter/360.0)*R
-	else:
-		return 0
 
 # start the app
 if __name__ == '__main__':
-	global latest_values 
-	global esp_buff
-	esp_buff = 0
-	latest_values = [{},{}]
 	app.run(host='0.0.0.0', port=port)
