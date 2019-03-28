@@ -6,7 +6,9 @@ import time
 import requests
 import numpy as np
 import binascii
+import datetime
 import datetime as dt
+from datetime import date
 from flask import Flask, Response, request, redirect, url_for, escape, jsonify, make_response
 from flask_mongoengine import MongoEngine
 from itertools import chain
@@ -16,6 +18,7 @@ from itertools import chain
 app = Flask(__name__)
 TIME_FORMAT = "%Y-%m-%d_%H:%M:%S"
 TIME_FORMAT_DEL = "%Y-%m-%dT%H:%M:%S"
+
 
 dev_euis = ['78AF580300000485','78AF580300000506', '78AF580300000512']
 
@@ -38,6 +41,16 @@ app.config['MONGODB_SETTINGS'] = [
 # bootstrap our app
 db = MongoEngine(app)
 
+class Event():
+	def __init__(self):
+		self.next_time = "2019-04-01T10:00:00"
+		self.watering_time = 60
+		self.action = 1
+
+next_step = Event()
+next_next_step = Event()
+
+
 class DataPoint(db.Document):
 	devEUI = db.StringField(required=True)
 	timestamp = db.DateTimeField()
@@ -54,6 +67,47 @@ class DataPoint(db.Document):
 
 # set the port dynamically with a default of 3000 for local development
 port = int(os.getenv('PORT', '3000'))
+
+def time_date_to_unix_time(timedate1):
+	TIME_FORMAT = "%Y-%m-%dT%H:%M:%S"
+	timee = time.mktime(datetime.datetime.strptime(timedate1, TIME_FORMAT).timetuple())
+	print(timee)
+	return timee
+
+def CHAR_to_HEX(ascii):
+	return format(ord(ascii), 'x')
+
+
+def int32_to_hex_clean(number, bytes):
+	if number > pow(2, 8*bytes):
+		return "F" * bytes
+	else:
+		print("number = ", number)
+		number_bytes = struct.pack(">I", number)
+		string = binascii.hexlify(bytearray(number_bytes))
+		print("string = ", string)
+	if len(string) == bytes*2:
+		return string
+	elif len(string) < (bytes*2):
+		return "0"*(bytes-len(string))+string
+	else:
+		return string[len(string) - bytes:]
+
+def next_steps_string(next_event, next_next_event):
+	next_step_str = CHAR_to_HEX('n')
+	next_step_str += int32_to_hex_clean((int)(time_date_to_unix_time(next_event.next_time)), 4)
+	next_step_str += int32_to_hex_clean((int)(next_event.watering_time), 2)
+	if next_event.action == 1:
+		next_step_str += "01"
+	else:
+		next_step_str += "00"
+	next_step_str += int32_to_hex_clean((int)(time_date_to_unix_time(next_next_event.next_time)), 4)
+	next_step_str += int32_to_hex_clean((int)(next_next_event.watering_time), 2)
+	if next_next_event.action == 1:
+		next_step_str += "01"
+	else:
+		next_step_str += "00"
+	return next_step_str
 
 # functions for decoding payload
 def bitshift (payload,lastbyte):
@@ -112,6 +166,17 @@ def db_query():
 
 	return datapoints
 
+def calculate_next_steps():
+	#if it is raining that day then program the next two dates just to acquire data and if not just water it
+	today = date.today()
+	next_step.next_time= today.strftime("%Y-%m-%d") + "T10:00:00"
+	next_step.action = 0
+	next_step.watering_time = 10
+	next_next_step.next_time = today.strftime("%Y-%m-%d") + "T10:05:00"
+	next_next_step.action = 1
+	next_next_step.watering_time = 20
+	return [next_step, next_next_step]
+
 
 # Swisscom LPN listener to POST from actility
 @app.route('/sc_lpn', methods=['POST'])
@@ -138,31 +203,32 @@ def sc_lpn():
 	r_bytes = bytearray.fromhex(payload)
 	print("payload=" + payload)
 	r_time = j['DevEUI_uplink']['Time']
-	r_timestamp = dt.datetime.strptime(r_time,"%Y-%m-%dT%H:%M:%S.%f+01:00")
+	[r_timestamp1, timezone] = r_time.split("+")
+	r_timestamp1 = r_timestamp1.split(".")[0]
+	r_timestamp = dt.datetime.strptime(r_timestamp1,"%Y-%m-%dT%H:%M:%S")
+
 	if len(r_bytes) == 1:
 		print ('bytes length = ', len(r_bytes))
-		if (r_bytes[0]==ord('t')):	##send time when receives t
-			print('Sending Time')
-			headers_post = "Content-type:application/x-www-form-urlencoded"
+		if r_bytes[0]==ord('t'):	##send time when receives t
+			command = CHAR_to_HEX('t')
 			r_time=int(time.time())
 			time_bytes = struct.pack(">I", r_time)
-			time_bytes_string =  binascii.hexlify(bytearray(time_bytes))
-			print('sending to LoRa payload : ',time_bytes_string)
-
-			params = {'DevEUI' : r_deveui,
-					  'FPORT' : '1',
-					  'Payload' : time_bytes_string}
-			url="https://proxy1.lpn.swisscom.ch/thingpark/lrc/rest/downlink/"
-			r = requests.post(url, params=params)
-			print("url", r.url)
-			print(r.text)
-			return r.text
+			time_bytes_string =  command + binascii.hexlify(bytearray(time_bytes))
+			print('Sending Time')
+			downlink_LoRa_data(time_bytes_string, r_deveui)
+			return "Data Sent"
 		elif r_bytes[0]==ord('U'):	##Unexpected Flow
-			print('unexpected flow')
+			print('Unexpected flow')
 			return "Unexpected Flow"
 		elif r_bytes[0]==ord('B'):	##Battery Low
 			print('Battery Low')
 			return "Battery Low"
+		elif r_bytes[0]==ord('n'):
+			[next_step, next_next_step] = calculate_next_steps()
+			next_step_command = next_steps_string(next_step, next_next_step)
+			print("Sending on LoRa: " , next_step_command)
+			downlink_LoRa_data(next_step_command, r_deveui)
+			return "Next Steps Sent"
 		else:
 			print("bytes = ", r_bytes[0])
 			return "something went wrong"
@@ -189,6 +255,20 @@ def sc_lpn():
 	datapoint.save()
 	print('Datapoint saved to database')
 	return 'Datapoint DevEUI %s saved' %(r_deveui)
+
+
+
+def downlink_LoRa_data(str, r_deveui):
+	headers_post = "Content-type:application/x-www-form-urlencoded"
+	print('sending to LoRa payload : ', str)
+	params = {'DevEUI': r_deveui,
+			  'FPORT': '1',
+			  'Payload': str}
+	url = "https://proxy1.lpn.swisscom.ch/thingpark/lrc/rest/downlink/"
+	r = requests.post(url, params=params)
+	print("url", r.url)
+	print(r.text)
+	return r.text
 
 
 # start the app
